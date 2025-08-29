@@ -1,0 +1,199 @@
+📂 Suggested File Structure
+onboarding/
+├── workflow-main.yaml        # main entrypoint workflow
+├── templates/
+│   ├── harbor.yaml           # Harbor onboarding template
+│   ├── argocd.yaml           # ArgoCD onboarding template
+│   ├── servicenow.yaml       # ServiceNow onboarding template
+│   └── namespace.yaml        # Namespace creation template
+
+1. workflow-main.yaml (Main Orchestrator)
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: project-onboarding
+  generateName: project-onboarding-
+spec:
+  entrypoint: onboard
+  arguments:
+    parameters:
+      - name: project_name
+        value: "demo-project"
+      - name: enable_harbor
+        value: "true"
+      - name: enable_servicenow
+        value: "false"
+      - name: enable_argocd
+        value: "true"
+
+  templates:
+  - name: onboard
+    dag:
+      tasks:
+        - name: create-namespace
+          templateRef:
+            name: namespace-template
+            template: create-namespace
+          arguments:
+            parameters:
+              - name: project_name
+                value: "{{workflow.parameters.project_name}}"
+
+        - name: harbor
+          templateRef:
+            name: harbor-template
+            template: onboard-harbor
+          when: "{{workflow.parameters.enable_harbor}} == true"
+          arguments:
+            parameters:
+              - name: project_name
+                value: "{{workflow.parameters.project_name}}"
+
+        - name: servicenow
+          templateRef:
+            name: servicenow-template
+            template: onboard-servicenow
+          when: "{{workflow.parameters.enable_servicenow}} == true"
+          arguments:
+            parameters:
+              - name: project_name
+                value: "{{workflow.parameters.project_name}}"
+
+        - name: argocd
+          templateRef:
+            name: argocd-template
+            template: onboard-argocd
+          when: "{{workflow.parameters.enable_argocd}} == true"
+          arguments:
+            parameters:
+              - name: project_name
+                value: "{{workflow.parameters.project_name}}"
+
+2. templates/namespace.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: namespace-template
+spec:
+  templates:
+  - name: create-namespace
+    inputs:
+      parameters:
+        - name: project_name
+    container:
+      image: bitnami/kubectl:latest
+      command: [sh, -c]
+      args: ["kubectl create ns {{inputs.parameters.project_name}} || echo 'Namespace exists'"]
+
+3. templates/harbor.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: harbor-template
+spec:
+  templates:
+  - name: onboard-harbor
+    inputs:
+      parameters:
+        - name: project_name
+    container:
+      image: curlimages/curl:latest
+      command: [sh, -c]
+      args:
+        - |
+          echo "Onboarding {{inputs.parameters.project_name}} into Harbor..."
+          curl -s -u "admin:$HARBOR_PASSWORD" -X POST \
+            "http://harbor.example.com/api/v2.0/projects" \
+            -H "Content-Type: application/json" \
+            -d '{
+                  "project_name": "{{inputs.parameters.project_name}}",
+                  "public": true,
+                  "metadata": { "auto_scan": "true", "reuse_sys_cve_whitelist": "true" }
+                }'
+    env:
+      - name: HARBOR_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            name: harbor-secret
+            key: password
+
+4. templates/argocd.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: argocd-template
+spec:
+  templates:
+  - name: onboard-argocd
+    inputs:
+      parameters:
+        - name: project_name
+    container:
+      image: argoproj/argocd:latest
+      command: [sh, -c]
+      args:
+        - |
+          echo "Creating ArgoCD App for {{inputs.parameters.project_name}}..."
+          argocd login argocd-server.example.com --username admin --password $ARGOCD_PASS --insecure && \
+          argocd app create {{inputs.parameters.project_name}} \
+            --repo https://git.example.com/org/{{inputs.parameters.project_name}}.git \
+            --path manifests \
+            --dest-server https://kubernetes.default.svc \
+            --dest-namespace {{inputs.parameters.project_name}}
+    env:
+      - name: ARGOCD_PASS
+        valueFrom:
+          secretKeyRef:
+            name: argocd-secret
+            key: password
+
+5. templates/servicenow.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: servicenow-template
+spec:
+  templates:
+  - name: onboard-servicenow
+    inputs:
+      parameters:
+        - name: project_name
+    container:
+      image: curlimages/curl:latest
+      command: [sh, -c]
+      args:
+        - |
+          echo "Creating ServiceNow record for {{inputs.parameters.project_name}}..."
+          curl -s -u "$SN_USER:$SN_PASS" -X POST \
+            "https://servicenow.example.com/api/now/table/cmdb_ci_project" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"{{inputs.parameters.project_name}}"}'
+    env:
+      - name: SN_USER
+        valueFrom:
+          secretKeyRef:
+            name: servicenow-secret
+            key: username
+      - name: SN_PASS
+        valueFrom:
+          secretKeyRef:
+            name: servicenow-secret
+            key: password
+
+⚡ How It Works
+
+Apply all templates once to your cluster:
+
+kubectl apply -f templates/
+
+
+Submit the main workflow:
+
+kubectl create -f workflow-main.yaml
+
+
+The workflow will:
+
+Always create a namespace.
+
+Conditionally create a project in Harbor, onboard in ArgoCD, or add a ServiceNow record based on the flags.
